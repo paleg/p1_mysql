@@ -31,6 +31,8 @@
 -define(TRANSACTIONS, 8192).
 -define(SECURE_CONNECTION, 32768).
 -define(CONNECT_WITH_DB, 8).
+-define(CLIENT_MULTI_RESULTS, 131072).
+-define(CLIENT_MULTI_STATEMENTS, 65536).
 
 -define(MAX_PACKET_SIZE, 1000000).
 
@@ -107,7 +109,7 @@ password_old(Password, Salt) ->
 %% part of do_old_auth/4, which is part of mysql_init/4
 make_auth(User, Password) ->
     Caps = ?LONG_PASSWORD bor ?LONG_FLAG
-	bor ?TRANSACTIONS bor ?FOUND_ROWS,
+	bor ?TRANSACTIONS bor ?FOUND_ROWS bor ?CLIENT_MULTI_RESULTS bor ?CLIENT_MULTI_STATEMENTS,
     Maxsize = 0,
     UserB = list_to_binary(User),
     PasswordB = Password,
@@ -124,7 +126,8 @@ make_new_auth(User, Password, Database) ->
 	     end,
     Caps = ?LONG_PASSWORD bor ?LONG_FLAG bor ?TRANSACTIONS bor
 	?PROTOCOL_41 bor ?SECURE_CONNECTION bor DBCaps
-	bor ?FOUND_ROWS,
+	bor ?FOUND_ROWS
+	bor ?CLIENT_MULTI_RESULTS bor ?CLIENT_MULTI_STATEMENTS,
     Maxsize = ?MAX_PACKET_SIZE,
     UserB = list_to_binary(User),
     PasswordL = size(Password),
