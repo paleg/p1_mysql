@@ -82,6 +82,8 @@
 	]).
 
 -include("p1_mysql.hrl").
+-include("p1_mysql_consts.hrl").
+
 -record(state, {
 	  mysql_version,
 	  log_fun,
@@ -130,7 +132,7 @@ start(Host, Port, User, Password, Database, ConnectTimeout,
 			init(Host, Port, User, Password, Database,
 			     ConnectTimeout, LogFun, ConnPid)
 		end),
-    post_start(Pid, LogFun).
+    post_start(Pid, ConnectTimeout, LogFun).
 
 start_link(Host, Port, User, Password, Database, LogFun) ->
     start_link(Host, Port, User, Password, Database, ?CONNECT_TIMEOUT, LogFun).
@@ -146,13 +148,15 @@ start_link(Host, Port, User, Password, Database, ConnectTimeout,
 			init(Host, Port, User, Password, Database,
 			     ConnectTimeout, LogFun, ConnPid)
 		end),
-    post_start(Pid, LogFun).
+    post_start(Pid, ConnectTimeout, LogFun).
 
 %% part of start/6 or start_link/6:
-post_start(Pid, _LogFun) ->
+post_start(Pid, ConnectTimeout, _LogFun) ->
     %%Timeout = get_option(timeout, Options, ?DEFAULT_STANDALONE_TIMEOUT),
     %%TODO find a way to get configured Options here
-    Timeout= ?DEFAULT_STANDALONE_TIMEOUT,
+    Timeout = if is_integer(ConnectTimeout) -> ConnectTimeout;
+		 true -> ?DEFAULT_STANDALONE_TIMEOUT
+	      end,
     receive
 	{p1_mysql_conn, Pid, ok} ->
 	    {ok, Pid};
@@ -269,6 +273,10 @@ do_recv(LogFun, RecvPid, SeqNum) when is_function(LogFun);
 	{p1_mysql_recv, RecvPid, closed, _E} ->
 	    p1_mysql:log(LogFun, error, "p1_mysql_conn: p1_mysql_recv:"
 		      " socket was closed ~p~n", [{RecvPid, _E}]),
+	    {error, "p1_mysql_recv: socket was closed"};
+	close ->
+	    p1_mysql:log(LogFun, error, "p1_mysql_conn: p1_mysql_recv:"
+					" received close~n", []),
 	    {error, "p1_mysql_recv: socket was closed"}
     end;
 do_recv(LogFun, RecvPid, SeqNum) when is_function(LogFun);
@@ -283,6 +291,10 @@ do_recv(LogFun, RecvPid, SeqNum) when is_function(LogFun);
 	{p1_mysql_recv, RecvPid, closed, _E} ->
 	    p1_mysql:log(LogFun, error, "p1_mysql_conn: p1_mysql_recv:"
 		      " socket was closed 2 ~p~n", [{RecvPid, _E}]),
+	    {error, "p1_mysql_recv: socket was closed"};
+	close ->
+	    p1_mysql:log(LogFun, error, "p1_mysql_conn: p1_mysql_recv:"
+					" received close~n", []),
 	    {error, "p1_mysql_recv: socket was closed"}
         end.
 
@@ -368,7 +380,14 @@ loop(State) ->
 		    erlang:cancel_timer(Ref),
 		    gen_server:reply(GenSrvFrom, Res)
 	    end,
-	    loop(State);
+	    case Res of
+		{error, #p1_mysql_result{error="p1_mysql_recv: socket was closed"}} ->
+		    p1_mysql:log(State#state.log_fun, error, "p1_mysql_conn: "
+							     "Connection closed, exiting.", []),
+		    close_connection(State);
+		_ ->
+		    loop(State)
+	    end;
 	{p1_mysql_recv, RecvPid, data, Packet, Num} ->
 	    p1_mysql:log(State#state.log_fun, error, "p1_mysql_conn: "
 		      "Received MySQL data when not expecting any "
@@ -382,7 +401,7 @@ loop(State) ->
                          "Connection closed, exiting.", []),
             close_connection(State);
 	close ->
-	    p1_mysql:log(State#state.log_fun, error, "p1_mysql_conn: "
+	    p1_mysql:log(State#state.log_fun, info, "p1_mysql_conn: "
 		      "Received close signal, exiting.", []),
 	    close_connection(State);
         Unknown ->
@@ -407,20 +426,11 @@ loop(State) ->
 mysql_init(Sock, RecvPid, User, Password, LogFun) ->
     case do_recv(LogFun, RecvPid, undefined) of
 	{ok, Packet, InitSeqNum} ->
-	    {Version, Salt1, Salt2, Caps} = greeting(Packet, LogFun),
-	    AuthRes =
-		case Caps band ?SECURE_CONNECTION of
-		    ?SECURE_CONNECTION ->
-			p1_mysql_auth:do_new_auth(Sock, RecvPid,
-					       InitSeqNum + 1,
-					       User, Password,
-					       Salt1, Salt2, LogFun);
-		    _ ->
-			p1_mysql_auth:do_old_auth(Sock, RecvPid,
-					       InitSeqNum + 1,
-					       User, Password,
-					       Salt1, LogFun)
-		end,
+	    {Version, Salt, Caps, AuthPlug} = greeting(Packet, LogFun),
+	    AuthRes = p1_mysql_auth:do_auth(AuthPlug, Sock, RecvPid,
+					    InitSeqNum + 1,
+					    User, Password,
+					    Salt, Caps, LogFun),
 	    case AuthRes of
 		{ok, <<0:8, _Rest/binary>>, _RecvNum} ->
 		    {ok,Version};
@@ -447,16 +457,38 @@ mysql_init(Sock, RecvPid, User, Password, LogFun) ->
 %% part of mysql_init/4
 greeting(Packet, LogFun) ->
     <<Protocol:8, Rest/binary>> = Packet,
-    {Version, Rest2} = asciz(Rest),
-    <<_TreadID:32/little, Rest3/binary>> = Rest2,
-    {Salt, Rest4} = asciz(Rest3),
-    <<Caps:16/little, Rest5/binary>> = Rest4,
-    <<ServerChar:16/binary-unit:8, Rest6/binary>> = Rest5,
-    {Salt2, _Rest7} = asciz(Rest6),
-    p1_mysql:log(LogFun, debug, "p1_mysql_conn: greeting version ~p (protocol ~p) "
-	      "salt ~p caps ~p serverchar ~p salt2 ~p",
-	      [Version, Protocol, Salt, Caps, ServerChar, Salt2]),
-    {normalize_version(Version, LogFun), Salt, Salt2, Caps}.
+    case Protocol of
+	9 ->
+	    {ServerStatusStr, Rest2} = asciz(Rest),
+	    <<_TreadID:32/little, Rest3/binary>> = Rest2,
+	    {Salt, _} = asciz(Rest3),
+	    p1_mysql:log(LogFun, debug, "p1_mysql_conn: greeting version ~p (protocol ~p) "
+					"salt ~p",
+			 [ServerStatusStr, Protocol, Salt]),
+	    {?MYSQL_4_0, Salt, 0, "old_pass"};
+	10 ->
+	    {ServerStatusStr, Rest2} = asciz(Rest),
+	    <<_TreadID:32/little, Salt1:8/binary, _:8, Caps1:16/little,
+	      CharSet:8, _StatusFlags:16/little, Caps2:16/little,
+	      AuthPlugLen:8, _:10/binary, Rest3/binary>> = Rest2,
+	    Caps = (Caps2 bsl 16) bor Caps1,
+	    {Salt2, AuthPlug} = case {Caps band ?CLIENT_PLUGIN_AUTH, AuthPlugLen} of
+				 {0, 0} ->
+				     Len = max(13, AuthPlugLen - 8) - 1,
+				     <<S:Len/binary, _/binary>> = Rest3,
+				     {S, "mysql_native_password"};
+				 {?CLIENT_PLUGIN_AUTH, _} ->
+				     Len = max(13, AuthPlugLen - 8) - 1,
+				     <<S:Len/binary, _:8, Rest4/binary>> = Rest3,
+				     {AuthPlugName, _} = asciz(Rest4),
+				     {S, AuthPlugName}
+			     end,
+	    Salt = binary_to_list(<<Salt1/binary, Salt2/binary>>),
+	    p1_mysql:log(LogFun, debug, "p1_mysql_conn: greeting version ~p (protocol ~p) "
+					"salt ~p caps ~p serverchar ~p auth_plug: ~p",
+			 [ServerStatusStr, Protocol, Salt, Caps, CharSet, AuthPlug]),
+	    {?MYSQL_4_1, Salt, Caps, AuthPlug}
+    end.
 
 %% part of greeting/2
 asciz(Data) when is_binary(Data) ->
@@ -702,28 +734,6 @@ do_send(Sock, Packet, SeqNum, _LogFun) when is_binary(Packet),
     %%p1_mysql:log(LogFun, debug, "p1_mysql_conn: send packet ~p: ~p",
     %%[SeqNum, Data]),
     gen_tcp:send(Sock, Data).
-
-%%--------------------------------------------------------------------
-%% Function: normalize_version(Version, LogFun)
-%%           Version  = string()
-%%           LogFun   = undefined | function() with arity 3
-%% Descrip.: Return a flag corresponding to the MySQL version used.
-%%           The protocol used depends on this flag.
-%% Returns : Version = string()
-%%--------------------------------------------------------------------
-normalize_version([$4,$.,$0|_T], LogFun) ->
-    p1_mysql:log(LogFun, debug, "Switching to MySQL 4.0.x protocol.~n"),
-    ?MYSQL_4_0;
-normalize_version([$4,$.,$1|_T], _LogFun) ->
-    ?MYSQL_4_1;
-normalize_version([$5|_T], _LogFun) ->
-    %% MySQL version 5.x protocol is compliant with MySQL 4.1.x:
-    ?MYSQL_4_1;
-normalize_version(_Other, LogFun) ->
-    p1_mysql:log(LogFun, error, "MySQL version not supported: MySQL Erlang "
-	      "module might not work correctly.~n"),
-    %% Error, but trying the oldest protocol anyway:
-    ?MYSQL_4_0.
 
 %%--------------------------------------------------------------------
 %% Function: get_field_datatype(DataType)

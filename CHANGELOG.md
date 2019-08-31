@@ -1,3 +1,24 @@
+# Version 1.0.11
+
+* Handle close even in do\_recv, this fixes potential connection being stuck after timeout
+
+# Version 1.0.10
+
+* Make socket close always lead to terminating p1\_mysql\_conn
+
+# Version 1.0.9
+
+* Add contribution guide
+* Don't log errors on shutdown
+
+# Version 1.0.8
+
+* Add support for mysql8 and cache\_sha2\_password authentication
+
+# Version 1.0.7
+
+* Fix connection timeout handling
+
 # Version 1.0.6
 
 * Add support for ipv6 connections
