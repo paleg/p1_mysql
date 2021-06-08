@@ -189,7 +189,6 @@ password_old(Password, Salt) ->
 %% part of do_old_auth/4, which is part of mysql_init/4
 make_auth(User, Password) ->
     Caps = ?LONG_PASSWORD bor ?LONG_FLAG
-	bor ?CLIENT_MULTI_RESULTS bor ?CLIENT_MULTI_STATEMENTS
 	bor ?TRANSACTIONS bor ?FOUND_ROWS,
     Maxsize = 0,
     UserB = list_to_binary(User),
@@ -214,7 +213,6 @@ make_new_auth(User, Password, Database, AuthMethod) ->
     Caps = ?CLIENT_LONG_PASSWORD bor ?CLIENT_LONG_FLAG bor
 	   ?CLIENT_TRANSACTIONS bor ?CLIENT_PROTOCOL_41 bor
 	   ?CLIENT_FOUND_ROWS bor ?CLIENT_RESERVED2 bor
-	   ?CLIENT_MULTI_RESULTS bor ?CLIENT_MULTI_STATEMENTS bor
 	   DBCaps bor AuthCaps,
     Maxsize = ?MAX_PACKET_SIZE,
     UserB = list_to_binary(User),
